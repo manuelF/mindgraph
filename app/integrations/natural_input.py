@@ -57,179 +57,203 @@
 # operational context, leveraging the `add_multiple_conditional_function` for dynamic data integration based on AI-generated content.
 
 from flask import Flask, request, jsonify
-import openai
+from groq import Groq
+import os
 import json
 from app.integration_manager import get_integration_function
 
 app = Flask(__name__)
 
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+groq_client = Groq(api_key=GROQ_API_KEY)
+GROQ_MODEL_NAME = "llama3-70b-8192"
+
 
 def create_knowledge_graph(app, natural_input):
-    with app.app_context():
-        try:
-            print("start openai call")
+  with app.app_context():
+    try:
+      print("start openai call")
 
-            with open("schema.json", "r") as file:
-                schema = json.load(file)
+      with open("schema.json", "r") as file:
+        schema = json.load(file)
 
-            nodes_properties = {}
-            node_types = []
-            all_edge_types = set()
+      nodes_properties = {}
+      node_types = []
+      all_edge_types = set()
 
-            for node_type, info in schema.items():
-                all_edge_types.update(info["edge_types"].keys())
-                node_types.append(info["node_type"])  # Collect node types
-                edges = list(info["edge_types"].keys())
-                properties = {
-                    "temp_id": {"type": "integer"},
-                    "name": {"type": "string"},
-                }
+      for node_type, info in schema.items():
+        all_edge_types.update(info["edge_types"].keys())
+        node_types.append(info["node_type"])  # Collect node types
+        edges = list(info["edge_types"].keys())
+        properties = {
+            "temp_id": {
+                "type": "integer"
+            },
+            "name": {
+                "type": "string"
+            },
+        }
 
-                # Add additional properties based on the schema
-                for edge_type, description in info["edge_types"].items():
-                    properties[edge_type] = {
-                        "type": "string",
-                        "description": description,
-                    }
+        # Add additional properties based on the schema
+        for edge_type, description in info["edge_types"].items():
+          properties[edge_type] = {
+              "type": "string",
+              "description": description,
+          }
 
-                nodes_properties[node_type] = {
+        nodes_properties[node_type] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": properties,
+                "required": ["temp_id", "name"],
+            },
+        }
+
+      edges = list(all_edge_types)
+      # print(f"edges: {edges}\n")
+
+    except Exception as e:
+      print(f"Error during knowledge graph creation: {e}")
+      return jsonify({"error": str(e)}), 500
+
+    messages = [
+        {
+            "role":
+            "system",
+            "content":
+            f"""
+            You are an AI expert specializing in knowledge graph creation with the goal of capturing relationships based on a given input or request.
+            You are given input in various forms such as paragraph, email, text files, and more.
+            Your task is to create a knowledge graph based on the input.
+            Only use organizations, people, and events as nodes and do not include concepts or products.
+            Only add nodes that have a relationship with at least one other node.
+            Make sure that the node type (people, org, event) matches the to_type or for_type when the entity is part of a relationship.
+          """,
+        },
+        {
+            "role":
+            "user",
+            "content":
+            f"Help me understand the following by creating a structured knowledge graph in JSON: Person A works at Org B. Person C works at Org B. Org D invested in Org B. Person E works at Org D.",
+        },
+        {
+            "role":
+            "assistant",
+            "content":
+            '{"nodes":{"Person":[{"temp_id":1,"name":"Person A"},{"temp_id":2,"name":"Person C"},{"temp_id":3,"name":"Person E"}],"Organization":[{"temp_id":4,"name":"Org B"},{"temp_id":5,"name":"Org D"}]},"relationships":[{"from_type":"Person","from_temp_id":1,"to_type":"Organization","to_temp_id":4,"data":{"relationship":"Works at"}},{"from_type":"Person","from_temp_id":2,"to_type":"Organization","to_temp_id":4,"data":{"relationship":"Works at"}},{"from_type":"Organization","from_temp_id":5,"to_type":"Organization","to_temp_id":4,"data":{"relationship":"Invested in"}},{"from_type":"Person","from_temp_id":3,"to_type":"Organization","to_temp_id":5,"data":{"relationship":"Works at"}}]}',
+        },
+        {
+            "role":
+            "user",
+            "content":
+            f"Help me understand the following by creating a structured knowledge graph: {natural_input}. Only reply with JSON, no explanations.",
+        },
+    ]
+    functions= {
+        "name": "knowledge_graph",
+        "description": f"Generate a knowledge graph with entities and relationships. Node types must be in {node_types}. Do your best to capture relationships. Do not abbreviate anything. Must only reply with JSON, No explanations. Brief.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nodes": {
+                    "type": "object",
+                    "properties": nodes_properties,
+                },
+                "relationships": {
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "properties": properties,
-                        "required": ["temp_id", "name"],
-                    },
-                }
-
-            edges = list(all_edge_types)
-            # print(f"edges: {edges}\n")
-
-        except Exception as e:
-            print(f"Error during knowledge graph creation: {e}")
-            return jsonify({"error": str(e)}), 500
-
-        completion = openai.ChatCompletion.create(
-            model="gpt-4-0125-preview",
-            messages=[
-                {
-                    "role": "system",
-                    "content": f"""
-                You are an AI expert specializing in knowledge graph creation with the goal of capturing relationships based on a given input or request.
-                You are given input in various forms such as paragraph, email, text files, and more.
-                Your task is to create a knowledge graph based on the input.
-                Only use organizations, people, and events as nodes and do not include concepts or products.
-                Only add nodes that have a relationship with at least one other node.
-                Make sure that the node type (people, org, event) matches the to_type or for_type when the entity is part of a relationship.
-              """,
-                },
-                {
-                    "role": "user",
-                    "content": f"Help me understand the following by creating a structured knowledge graph: Person A works at Org B. Person C works at Org B. Org D invested in Org B. Person E works at Org D.",
-                },
-                {
-                    "role": "assistant",
-                    "content": '{"nodes":{"Person":[{"temp_id":1,"name":"Person A"},{"temp_id":2,"name":"Person C"},{"temp_id":3,"name":"Person E"}],"Organization":[{"temp_id":4,"name":"Org B"},{"temp_id":5,"name":"Org D"}]},"relationships":[{"from_type":"Person","from_temp_id":1,"to_type":"Organization","to_temp_id":4,"data":{"relationship":"Works at"}},{"from_type":"Person","from_temp_id":2,"to_type":"Organization","to_temp_id":4,"data":{"relationship":"Works at"}},{"from_type":"Organization","from_temp_id":5,"to_type":"Organization","to_temp_id":4,"data":{"relationship":"Invested in"}},{"from_type":"Person","from_temp_id":3,"to_type":"Organization","to_temp_id":5,"data":{"relationship":"Works at"}}]}',
-                },
-                {
-                    "role": "user",
-                    "content": f"Help me understand the following by creating a structured knowledge graph: {natural_input}",
-                },
-            ],
-            functions=[
-                {
-                    "name": "knowledge_graph",
-                    "description": f"Generate a knowledge graph with entities and relationships. Node types must be in {node_types}. Do your best to capture relationships. Do not abbreviate anything. Do not provide a response that is not part of the JSON.",
-                    "parameters": {
-                        "type": "object",
                         "properties": {
-                            "nodes": {
-                                "type": "object",
-                                "properties": nodes_properties,
+                            "from_type": {
+                                "type": "string",
                             },
-                            "relationships": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "from_type": {
-                                            "type": "string",
-                                        },
-                                        "from_temp_id": {"type": "integer"},
-                                        "to_type": {
-                                            "type": "string",
-                                        },
-                                        "to_temp_id": {"type": "integer"},
-                                        "data": {
-                                            "type": "object",
-                                            "properties": {
-                                                "relationship": {
-                                                    "type": "string",
-                                                    "description": "Detailed relationship information between the two properties.",
-                                                    "enum": edges,
-                                                },
-                                                "snippet": {
-                                                    "type": "string",
-                                                    "description": "Provide a snippet from the source word for word (either one or more full sentences) describing this relationship between the two entities.",
-                                                },
-                                            },
-                                            "required": ["relationship", "snippet"],
-                                        },
+                            "from_temp_id": {"type": "integer"},
+                            "to_type": {
+                                "type": "string",
+                            },
+                            "to_temp_id": {"type": "integer"},
+                            "data": {
+                                "type": "object",
+                                "properties": {
+                                    "relationship": {
+                                        "type": "string",
+                                        "description": "Detailed relationship information between the two properties.",
+                                        "enum": edges,
                                     },
-                                    "required": [
-                                        "from_type",
-                                        "from_temp_id",
-                                        "to_type",
-                                        "to_temp_id",
-                                        "data",
-                                    ],
+                                    "snippet": {
+                                        "type": "string",
+                                        "description": "Provide a snippet from the source word for word (either one or more full sentences) describing this relationship between the two entities.",
+                                    },
                                 },
+                                "required": ["relationship", "snippet"],
                             },
                         },
-                        "required": ["nodes", "relationships"],
+                        "required": [
+                            "from_type",
+                            "from_temp_id",
+                            "to_type",
+                            "to_temp_id",
+                            "data",
+                        ],
                     },
-                }
-            ],
-            function_call={"name": "knowledge_graph"},
-        )
-        print("OPENAI END")
-        print(completion.choices[0])
+                },
+            },
+            "required": ["nodes", "relationships"],
+        },
+    }
+    
+    # function_call={"name": "knowledge_graph"}
+    response = groq_client.chat.completions.create(
+        model=os.environ.get('GROQ_MODEL_NAME', GROQ_MODEL_NAME),
+        messages=messages,
+        max_tokens=2048,
+        tools=[{
+          "type":"function",
+          "function":functions,
+        }],
+        tool_choice= {"type": "function", "function": {"name": "knowledge_graph"}})
 
-        response_data = completion.choices[0]["message"]["function_call"]["arguments"]
+    print("OPENAI END")
+    print(response.choices)
+    response_message = response.choices[0].message
+    tool_calls = response_message.tool_calls
+    function_args = json.loads(tool_call[0].function.arguments)
+    # response_data = response.choices["message"]["function_call"]["arguments"]
+    response_data = function_args
 
-        return response_data
+    return response_data
 
 
 def natural_input(app, data):
-    with app.app_context():
-        try:
-            # Assume create_knowledge_graph returns the correct data structure
-            knowledge_graph_data = create_knowledge_graph(app, data)
-            knowledge_graph_data = json.loads(knowledge_graph_data)
+  with app.app_context():
+    try:
+      # Assume create_knowledge_graph returns the correct data structure
+      knowledge_graph_data = create_knowledge_graph(app, data)
+      knowledge_graph_data = json.loads(knowledge_graph_data)
 
-            # Retrieve the callable function for the add_multiple_conditional integration
-            print("get function")
-            add_multiple_conditional_function = get_integration_function(
-                "add_multiple_conditional"
-            )
+      # Retrieve the callable function for the add_multiple_conditional integration
+      print("get function")
+      add_multiple_conditional_function = get_integration_function(
+          "add_multiple_conditional")
 
-            if not add_multiple_conditional_function:
-                raise ValueError("Target integration function not found")
+      if not add_multiple_conditional_function:
+        raise ValueError("Target integration function not found")
 
-            # Prepare the data in the format expected by the add_multiple_conditional integration
+      # Prepare the data in the format expected by the add_multiple_conditional integration
 
-            print("start adding")
-            add_multiple_conditional_data = knowledge_graph_data
+      print("start adding")
+      add_multiple_conditional_data = knowledge_graph_data
 
-            # Call the target integration function and get the response
-            response = add_multiple_conditional_function(
-                app, add_multiple_conditional_data
-            )
+      # Call the target integration function and get the response
+      response = add_multiple_conditional_function(
+          app, add_multiple_conditional_data)
 
-            return response
-        except Exception as e:
-            print(f"Failed to trigger add_multiple_conditional: {e}")
-            return jsonify({"error": str(e)}), 500
+      return response
+    except Exception as e:
+      print(f"Failed to trigger add_multiple_conditional: {e}")
+      return jsonify({"error": str(e)}), 500
 
 
 def register(integration_manager):
-    integration_manager.register("natural_input", natural_input)
+  integration_manager.register("natural_input", natural_input)
